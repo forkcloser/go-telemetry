@@ -65,3 +65,21 @@
 #   unshipped:                       # the main packages under cmd/ no release ships (book/releasing.md):
 #     - ./cmd/gen                    #   built and run from the tree; one command per entry, read by
 #                                    #   limen's workflows rule, nothing for golangci-lint
+golangci:
+  linters:
+    exclusions:
+      rules:
+        # The keys this package writes are attribute names of OpenTelemetry's
+        # semantic conventions, which are dotted: exception.type,
+        # service.name. They are built as slog.Attr because that is the type
+        # an attribute has here, and a store reads them by those names.
+        - linters:
+            - sloglint
+          text: keys should be written in snake_case
+    settings:
+      depguard:
+        rules:
+          main:
+            allow:
+              # The requests go through the house's client.
+              - github.com/forkcloser/go-xhttp

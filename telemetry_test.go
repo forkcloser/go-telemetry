@@ -52,15 +52,15 @@ type receiver struct {
 	onLogs func()
 }
 
-func receive(t *testing.T) *receiver {
-	t.Helper()
+func receive(tb testing.TB) *receiver {
+	tb.Helper()
 
 	got := &receiver{}
 
 	got.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Error(err)
+			tb.Error(err)
 		}
 
 		got.mu.Lock()
@@ -87,7 +87,7 @@ func receive(t *testing.T) *receiver {
 		}
 
 		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/x-protobuf" {
-			t.Errorf("%s %s with Content-Type %q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+			tb.Errorf("%s %s with Content-Type %q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
 		}
 
 		got.mu.Lock()
@@ -99,22 +99,22 @@ func receive(t *testing.T) *receiver {
 		case "/v1/logs":
 			decoded := &logsservice.ExportLogsServiceRequest{}
 			if err = proto.Unmarshal(body, decoded); err != nil {
-				t.Errorf("the logs request is not OTLP: %v", err)
+				tb.Errorf("the logs request is not OTLP: %v", err)
 			}
 
 			got.logs = append(got.logs, decoded)
 		case "/v1/metrics":
 			decoded := &metricsservice.ExportMetricsServiceRequest{}
 			if err = proto.Unmarshal(body, decoded); err != nil {
-				t.Errorf("the metrics request is not OTLP: %v", err)
+				tb.Errorf("the metrics request is not OTLP: %v", err)
 			}
 
 			got.metrics = append(got.metrics, decoded)
 		default:
-			t.Errorf("a request for %s", r.URL.Path)
+			tb.Errorf("a request for %s", r.URL.Path)
 		}
 	}))
-	t.Cleanup(got.Close)
+	tb.Cleanup(got.Close)
 
 	return got
 }
@@ -122,12 +122,12 @@ func receive(t *testing.T) *receiver {
 // config is a Config that reaches the receiver, and sends often.
 func (r *receiver) config() telemetry.Config {
 	return telemetry.Config{
-		Endpoint: r.URL,
-		Client:   xhttp.NewClient(xhttp.Config{Cleartext: true}),
-		Service:  "prototype",
-		Version:  "1.2.3",
-		Instance: "one",
-		Interval: 20 * time.Millisecond,
+		Endpoint:  r.URL,
+		Transport: xhttp.Config{Cleartext: true},
+		Service:   "prototype",
+		Version:   "1.2.3",
+		Instance:  "one",
+		Interval:  20 * time.Millisecond,
 	}
 }
 
@@ -765,22 +765,65 @@ func TestMistakesInTheProgramPanic(t *testing.T) {
 	}
 }
 
-// roundTrip is a function as an http.RoundTripper.
-type roundTrip func(*http.Request) (*http.Response, error)
+// station is an exporter and the stand-in it reports to, for a test that
+// sends through them many times over: a fuzzer runs thousands of inputs a
+// second, and an exporter of its own for each would be a connection for
+// each, more than a machine has ports for. One station is one connection.
+type station struct {
+	got      *receiver
+	exporter *telemetry.Exporter
+}
 
-func (f roundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+// open is a station whose exporter sends what it holds every millisecond,
+// stopped when the test ends.
+func open(tb testing.TB) *station {
+	tb.Helper()
 
-// direct is a client that hands its requests to the stand-in with no
-// connection in between: a fuzzer makes thousands of requests a second, and
-// a machine runs out of ports for as many connections.
-func (r *receiver) direct() *http.Client {
-	return &http.Client{Transport: roundTrip(func(req *http.Request) (*http.Response, error) {
-		answer := httptest.NewRecorder()
+	got := receive(tb)
 
-		r.Config.Handler.ServeHTTP(answer, req)
+	config := got.config()
+	config.Interval = time.Millisecond
+	config.OnError = func(err error) { tb.Log(err) }
 
-		return answer.Result(), nil
-	})}
+	exporter := telemetry.New(config)
+
+	tb.Cleanup(func() {
+		//nolint:usetesting // the test's own context has ended by the time its cleanups run
+		ctx, cancel := context.WithTimeout(context.Background(), patient)
+		defer cancel()
+
+		_ = exporter.Shutdown(ctx)
+	})
+
+	return &station{got: got, exporter: exporter}
+}
+
+// next has send hand the exporter one record, and returns it as the
+// stand-in received it. One at a time: what the stand-in holds is forgotten
+// first, so that it holds what one test needs however many came before.
+func (s *station) next(t *testing.T, send func(*telemetry.Exporter)) *logs.LogRecord {
+	t.Helper()
+
+	s.got.forget()
+	send(s.exporter)
+
+	for deadline := time.Now().Add(patient); ; time.Sleep(100 * time.Microsecond) {
+		if reported := s.got.records(); len(reported) > 0 {
+			return reported[0]
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal("the record never reached the stand-in")
+		}
+	}
+}
+
+// forget empties the stand-in of what it has received.
+func (r *receiver) forget() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.logs, r.metrics, r.headers = nil, nil, nil
 }
 
 // FuzzALogRecord: whatever a program logs, bytes that are no text among it,
@@ -791,27 +834,22 @@ func FuzzALogRecord(f *testing.F) {
 	f.Add("\xff", "\xc3", "a\x80b")
 	f.Add("€", "k\x00", strings.Repeat("\xf0\x9d", 3))
 
+	sends := open(f)
+
 	f.Fuzz(func(t *testing.T, message, key, value string) {
-		got := receive(t)
-
-		config := got.config()
-		config.Client = got.direct()
-		config.Interval = time.Hour
-		config.OnError = func(err error) { t.Log(err) }
-
-		exporter := telemetry.New(config)
-
-		logger := slog.New(exporter.Handler(nil))
-
-		logger.Info(message, slog.String(key, value)) //nolint:sloglint // the message is what is fuzzed
-		shutdown(t, exporter)
-
-		reported := got.records()
-		if len(reported) != 1 {
-			t.Fatalf("%d records for one logged", len(reported))
+		// A record of more than 256 KiB is dropped, which another test is
+		// of, and each byte that is no text is written as three.
+		if len(message)+len(key)+len(value) > 64<<10 {
+			t.Skip("more than a record carries")
 		}
 
-		if body := reported[0].GetBody().GetStringValue(); body != strings.ToValidUTF8(message, "�") {
+		record := sends.next(t, func(exporter *telemetry.Exporter) {
+			logger := slog.New(exporter.Handler(nil))
+
+			logger.Info(message, slog.String(key, value)) //nolint:sloglint // the message is what is fuzzed
+		})
+
+		if body := record.GetBody().GetStringValue(); body != strings.ToValidUTF8(message, "�") {
 			t.Errorf("the body is %q, of the message %q", body, message)
 		}
 
@@ -819,7 +857,7 @@ func FuzzALogRecord(f *testing.F) {
 			return
 		}
 
-		attrs := mapped(reported[0].GetAttributes())
+		attrs := mapped(record.GetAttributes())
 
 		if stored := attrs[strings.ToValidUTF8(key, "�")]; stored != strings.ToValidUTF8(value, "�") {
 			t.Errorf("the attribute %q is %q, of the value %q", key, stored, value)

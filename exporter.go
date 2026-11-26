@@ -60,10 +60,13 @@ type Config struct {
 	Endpoint string
 	// Headers are added to every request.
 	Headers http.Header
-	// Client carries the requests. With none, it is go-xhttp's baseline,
-	// https with a post-quantum hybrid key exchange only: an endpoint that
-	// needs less, an http one among them, gets a client that says so.
-	Client *http.Client
+	// Transport is how the endpoint is reached: the exporter makes its own
+	// go-xhttp client under it, and uses no other. Its zero value is
+	// go-xhttp's baseline, https with a post-quantum hybrid key exchange
+	// only; an endpoint that needs less, an http one among them, is one the
+	// program says so of here. A program hands the exporter no client of its
+	// own and shares no connection with it.
+	Transport xhttp.Config
 	// Service, Version and Instance are the resource's service.name,
 	// service.version and service.instance.id. With no Instance, host.name
 	// is the host's name.
@@ -134,8 +137,9 @@ type sender struct {
 }
 
 // New returns an exporter under config, and starts it. Shutdown stops it.
-// It panics on an endpoint that is no URL, and on an endpoint with no
-// Service: a record nobody can attribute is worth nothing.
+// It panics on an endpoint that is no URL, on an endpoint with no Service: a
+// record nobody can attribute is worth nothing; and, as go-xhttp does, on a
+// Transport that is wrong.
 func New(config Config) *Exporter {
 	if config.Endpoint == "" {
 		return &Exporter{}
@@ -184,8 +188,8 @@ func New(config Config) *Exporter {
 	return exporter
 }
 
-// reached is the endpoint of a Config that has one, and the client that
-// reaches it. It panics as New says.
+// reached is the endpoint of a Config that has one, and a client of its own
+// that reaches it. It panics as New says.
 func (config Config) reached() (*url.URL, *http.Client) {
 	base, err := url.Parse(config.Endpoint)
 	if err != nil || base.Host == "" {
@@ -196,11 +200,7 @@ func (config Config) reached() (*url.URL, *http.Client) {
 		panic("telemetry: an exporter with an endpoint needs a Service")
 	}
 
-	if config.Client != nil {
-		return base, config.Client
-	}
-
-	return base, xhttp.NewClient(xhttp.Config{})
+	return base, xhttp.NewClient(config.Transport)
 }
 
 // resource writes the Resource message of every request.

@@ -1,6 +1,7 @@
 package telemetry_test
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/forkcloser/go-xhttp"
 
 	"github.com/forkcloser/go-telemetry"
 )
@@ -412,5 +415,43 @@ func TestAnErrorDoesNotTellTheEndpointsPassword(t *testing.T) {
 		}
 	default:
 		t.Error("a refused request was told to no one")
+	}
+}
+
+// TestTheExporterReachesItsEndpointUnderItsTransport: the client is the
+// exporter's own, made under Config.Transport. With none said, it is
+// go-xhttp's baseline, which sends nothing in cleartext: an http endpoint
+// gets no request, and the program is told why.
+func TestTheExporterReachesItsEndpointUnderItsTransport(t *testing.T) {
+	t.Parallel()
+
+	got := receive(t)
+
+	told := make(chan error, 8)
+
+	config := got.config()
+	config.Transport = xhttp.Config{}
+	config.OnError = func(err error) { told <- err }
+
+	exporter := telemetry.New(config)
+
+	slog.New(exporter.Handler(nil)).Info("a record")
+
+	_ = exporter.Shutdown(t.Context())
+
+	select {
+	case err := <-told:
+		if !errors.Is(err, xhttp.ErrCleartext) || !errors.Is(err, telemetry.ErrExport) {
+			t.Errorf("an http endpoint under the baseline: %v, want go-xhttp's refusal of cleartext", err)
+		}
+	default:
+		t.Error("an http endpoint under the baseline: nothing was refused")
+	}
+
+	got.mu.Lock()
+	defer got.mu.Unlock()
+
+	if got.asked != 0 {
+		t.Errorf("%d requests reached an http endpoint under the baseline, want none", got.asked)
 	}
 }

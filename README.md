@@ -56,9 +56,22 @@ What an exporter promises:
 - **A request is small:** 512 records at most, and 4 MiB of them.
 - **Metrics lose nothing to a failed request:** the sums are cumulative.
 
-The requests go through [go-xhttp](https://github.com/forkcloser/go-xhttp):
-https with a post-quantum hybrid key exchange unless the program hands
-`Config.Client` another client.
+Every request goes through [go-xhttp](https://github.com/forkcloser/go-xhttp),
+and through nothing else: the exporter makes a client of its own under
+`Config.Transport`, which is go-xhttp's configuration. Its zero value is
+https with a post-quantum hybrid key exchange only, and an endpoint that needs
+less is one the program says so of:
+
+```go
+telemetry.Config{
+	Endpoint:  "http://collector.internal:4318",
+	Service:   "door",
+	Transport: xhttp.Config{Cleartext: true},
+}
+```
+
+A program hands the exporter no client of its own and shares no connection
+with it.
 
 ## Crash reports
 

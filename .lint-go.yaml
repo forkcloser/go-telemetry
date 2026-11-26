@@ -83,3 +83,7 @@ golangci:
             allow:
               # The requests go through the house's client.
               - github.com/forkcloser/go-xhttp
+              # The watcher: descriptors, signals and the terminal, on Unix;
+              # what a handle is of, on Windows.
+              - golang.org/x/sys/unix
+              - golang.org/x/sys/windows

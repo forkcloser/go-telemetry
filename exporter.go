@@ -83,6 +83,10 @@ type Config struct {
 	// OnError is told each failed export. It must not log through this
 	// exporter's own handler.
 	OnError func(error)
+	// CrashDelivery is how long a watcher ([Watch]) may take to deliver the
+	// report of a crash, which is how long it goes on after the program when
+	// the endpoint is out of reach; zero is DefaultCrashDelivery.
+	CrashDelivery time.Duration
 }
 
 // Exporter sends an application's log records and metrics to an OTLP/HTTP

@@ -153,10 +153,10 @@ none, or does not call it.
 variable of its own, `_TELEMETRY_INTERNAL_ROLE`, which that process takes out
 of its environment as it reads it. It is internal: no configuration, no part
 of what the library offers, and its name and content may change. It is named
-here because it is the one thing the library reads of the environment. Set by
-anything but `Watch` it changes nothing: a process takes a role only when it
-was also started with what `Watch` starts it with, a pipe under the number
-the role names.
+here because it is the one thing the library reads of the environment. Set
+alone it changes nothing: a process takes a role only when it was also
+started with what `Watch` starts it with, a pipe under the number the role
+names.
 
 ### Limits
 

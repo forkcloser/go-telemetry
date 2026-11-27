@@ -5,35 +5,19 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/forkcloser/go-telemetry"
 )
 
-// recovered is the attributes of the one record an exporter sends for a
+// recovered is the attributes of the record a station's exporter sends for a
 // panic reported with value and stack.
-func recovered(t *testing.T, value any, stack []byte) map[string]any {
+func recovered(t *testing.T, sends *station, value any, stack []byte) map[string]any {
 	t.Helper()
 
-	got := receive(t)
+	record := sends.next(t, func(exporter *telemetry.Exporter) { exporter.Recovered(value, stack) })
 
-	config := got.config()
-	config.Client = got.direct()
-	config.Interval = time.Hour
-	config.OnError = func(err error) { t.Log(err) }
-
-	exporter := telemetry.New(config)
-
-	exporter.Recovered(value, stack)
-	shutdown(t, exporter)
-
-	reported := got.records()
-	if len(reported) != 1 {
-		t.Fatalf("%d records for one recovered panic", len(reported))
-	}
-
-	return mapped(reported[0].GetAttributes())
+	return mapped(record.GetAttributes())
 }
 
 // TestARecoveredPanicIsACrashRecord: with what recover returned as its
@@ -41,10 +25,12 @@ func recovered(t *testing.T, value any, stack []byte) map[string]any {
 func TestARecoveredPanicIsACrashRecord(t *testing.T) {
 	t.Parallel()
 
+	sends := open(t)
+
 	var attrs map[string]any
 
 	func() {
-		defer func() { attrs = recovered(t, recover(), debug.Stack()) }()
+		defer func() { attrs = recovered(t, sends, recover(), debug.Stack()) }()
 
 		panic("recovered on purpose")
 	}()
@@ -68,13 +54,15 @@ func TestARecoveredPanicIsACrashRecord(t *testing.T) {
 func TestALongMessageIsCutAtACharacter(t *testing.T) {
 	t.Parallel()
 
+	sends := open(t)
+
 	for name, value := range map[string]string{
 		"two bytes a character":   strings.Repeat("é", 2000),
 		"three bytes a character": strings.Repeat("€", 2000),
 		"four bytes a character":  strings.Repeat("𝄞", 2000),
 		"of one byte, then three": "a" + strings.Repeat("€", 2000),
 	} {
-		message := text(recovered(t, value, debug.Stack())["exception.message"])
+		message := text(recovered(t, sends, value, debug.Stack())["exception.message"])
 
 		if len(message) > 1<<10 || len(message) < 1<<10-utf8.UTFMax || !utf8.ValidString(message) ||
 			!strings.HasPrefix(value, message) {
@@ -91,10 +79,10 @@ func TestALongMessageIsCutAtACharacter(t *testing.T) {
 
 // checkRecovered holds a record of a recovered panic to what every crash
 // record is, whatever it was made of.
-func checkRecovered(t *testing.T, value string, stack []byte) {
+func checkRecovered(t *testing.T, sends *station, value string, stack []byte) {
 	t.Helper()
 
-	attrs := recovered(t, value, stack)
+	attrs := recovered(t, sends, value, stack)
 
 	if mark := text(attrs["crash.fingerprint"]); !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(mark) {
 		t.Errorf("fingerprint %q, want 32 hexadecimal digits", mark)
@@ -117,7 +105,7 @@ func checkRecovered(t *testing.T, value string, stack []byte) {
 	}
 
 	// The same again has the same fingerprint.
-	if again := recovered(t, value, stack); again["crash.fingerprint"] != attrs["crash.fingerprint"] {
+	if again := recovered(t, sends, value, stack); again["crash.fingerprint"] != attrs["crash.fingerprint"] {
 		t.Errorf(
 			"the same panic, twice: fingerprints %v and %v",
 			attrs["crash.fingerprint"],
@@ -154,7 +142,7 @@ func TestRecoveredTakesAnyStack(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			checkRecovered(t, "a value\nof two lines, and \xff", []byte(stack))
+			checkRecovered(t, open(t), "a value\nof two lines, and \xff", []byte(stack))
 		})
 	}
 }
@@ -167,7 +155,9 @@ func FuzzRecovered(f *testing.F) {
 		f.Add("a value\nof two lines, and \xff", []byte(stack))
 	}
 
-	f.Fuzz(checkRecovered)
+	sends := open(f)
+
+	f.Fuzz(func(t *testing.T, value string, stack []byte) { checkRecovered(t, sends, value, stack) })
 }
 
 // TestAFingerprintIsOfTheProgramsOwnFrames: the functions of the goroutine
@@ -178,8 +168,10 @@ func FuzzRecovered(f *testing.F) {
 func TestAFingerprintIsOfTheProgramsOwnFrames(t *testing.T) {
 	t.Parallel()
 
+	sends := open(t)
+
 	fingerprint := func(stack string) string {
-		return text(recovered(t, "a fault", []byte(stack))["crash.fingerprint"])
+		return text(recovered(t, sends, "a fault", []byte(stack))["crash.fingerprint"])
 	}
 
 	plain := fingerprint("goroutine 1 [running]:\n" +
@@ -212,10 +204,10 @@ func TestAFingerprintIsOfTheProgramsOwnFrames(t *testing.T) {
 	// program's crash, is the value still.
 	stack := "goroutine 1 [running]:\nmain.fault(...)\n\t/main.go:7 +0x18\n"
 	quoting := text(
-		recovered(t, "the child said:\ngoroutine 9 [running]:\nmain.other()\n\ngoroutine 1:", []byte(stack))["crash.fingerprint"],
+		recovered(t, sends, "the child said:\ngoroutine 9 [running]:\nmain.other()\n\ngoroutine 1:", []byte(stack))["crash.fingerprint"],
 	)
 
-	if said := text(recovered(t, "a fault", []byte(stack))["crash.fingerprint"]); quoting != said {
+	if said := text(recovered(t, sends, "a fault", []byte(stack))["crash.fingerprint"]); quoting != said {
 		t.Errorf("the same frames under a value that quotes a traceback: %q, want %q", quoting, said)
 	}
 }

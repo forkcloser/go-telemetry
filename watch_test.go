@@ -64,10 +64,10 @@ func program(way string) int {
 	}
 
 	config := telemetry.Config{
-		Endpoint: os.Getenv(endpointVariable),
-		Client:   xhttp.NewClient(xhttp.Config{Cleartext: true}),
-		Service:  "watched",
-		Version:  "1.2.3",
+		Endpoint:  os.Getenv(endpointVariable),
+		Transport: xhttp.Config{Cleartext: true},
+		Service:   "watched",
+		Version:   "1.2.3",
 	}
 
 	if within, err := time.ParseDuration(os.Getenv(deliveryVariable)); err == nil {

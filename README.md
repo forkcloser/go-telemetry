@@ -56,9 +56,22 @@ What an exporter promises:
 - **A request is small:** 512 records at most, and 4 MiB of them.
 - **Metrics lose nothing to a failed request:** the sums are cumulative.
 
-The requests go through [go-xhttp](https://github.com/forkcloser/go-xhttp):
-https with a post-quantum hybrid key exchange unless the program hands
-`Config.Client` another client.
+Every request goes through [go-xhttp](https://github.com/forkcloser/go-xhttp),
+and through nothing else: the exporter makes a client of its own under
+`Config.Transport`, which is go-xhttp's configuration. Its zero value is
+https with a post-quantum hybrid key exchange only, and an endpoint that needs
+less is one the program says so of:
+
+```go
+telemetry.Config{
+	Endpoint:  "http://collector.internal:4318",
+	Service:   "door",
+	Transport: xhttp.Config{Cleartext: true},
+}
+```
+
+A program hands the exporter no client of its own and shares no connection
+with it.
 
 ## Crash reports
 
@@ -140,10 +153,10 @@ none, or does not call it.
 variable of its own, `_TELEMETRY_INTERNAL_ROLE`, which that process takes out
 of its environment as it reads it. It is internal: no configuration, no part
 of what the library offers, and its name and content may change. It is named
-here because it is the one thing the library reads of the environment. Set by
-anything but `Watch` it changes nothing: a process takes a role only when it
-was also started with what `Watch` starts it with, a pipe under the number
-the role names.
+here because it is the one thing the library reads of the environment. Set
+alone it changes nothing: a process takes a role only when it was also
+started with what `Watch` starts it with, a pipe under the number the role
+names.
 
 ### Limits
 

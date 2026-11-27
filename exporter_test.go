@@ -1,9 +1,11 @@
 package telemetry_test
 
 import (
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -418,40 +420,65 @@ func TestAnErrorDoesNotTellTheEndpointsPassword(t *testing.T) {
 	}
 }
 
+// secured is the stand-in over https, with a certificate of its own.
+func secured(tb testing.TB) *receiver {
+	tb.Helper()
+
+	return stand(tb, httptest.NewTLSServer, func(what string) { tb.Error(what) })
+}
+
 // TestTheExporterReachesItsEndpointUnderItsTransport: the client is the
-// exporter's own, made under Config.Transport. With none said, it is
-// go-xhttp's baseline, which sends nothing in cleartext: an http endpoint
-// gets no request, and the program is told why.
+// exporter's own, made under Config.Transport. An https endpoint whose
+// certificate the baseline does not know is reached when the Transport names
+// its root, and refused when it does not.
 func TestTheExporterReachesItsEndpointUnderItsTransport(t *testing.T) {
 	t.Parallel()
 
-	got := receive(t)
+	got := secured(t)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(got.Certificate())
 
 	told := make(chan error, 8)
 
 	config := got.config()
-	config.Transport = xhttp.Config{}
+	config.Transport = xhttp.Config{Roots: roots}
 	config.OnError = func(err error) { told <- err }
 
-	exporter := telemetry.New(config)
+	trusting := telemetry.New(config)
 
-	slog.New(exporter.Handler(nil)).Info("a record")
+	slog.New(trusting.Handler(nil)).Info("to an endpoint the transport trusts")
+	shutdown(t, trusting)
 
-	_ = exporter.Shutdown(t.Context())
+	if reported := got.records(); len(reported) != 1 || len(told) != 0 {
+		t.Fatalf(
+			"under a Transport with the endpoint's root: %d records, %d errors; want 1 and none",
+			len(reported),
+			len(told),
+		)
+	}
+
+	config.Transport = xhttp.Config{}
+
+	wary := telemetry.New(config)
+
+	slog.New(wary.Handler(nil)).Info("to an endpoint the baseline does not trust")
+
+	_ = wary.Shutdown(t.Context())
 
 	select {
 	case err := <-told:
-		if !errors.Is(err, xhttp.ErrCleartext) || !errors.Is(err, telemetry.ErrExport) {
-			t.Errorf("an http endpoint under the baseline: %v, want go-xhttp's refusal of cleartext", err)
+		if _, unknown := errors.AsType[x509.UnknownAuthorityError](
+			err,
+		); !unknown ||
+			!errors.Is(err, telemetry.ErrExport) {
+			t.Errorf("under the baseline: %v, want the certificate refused as of an unknown authority", err)
 		}
 	default:
-		t.Error("an http endpoint under the baseline: nothing was refused")
+		t.Error("under the baseline: nothing was refused")
 	}
 
-	got.mu.Lock()
-	defer got.mu.Unlock()
-
-	if got.asked != 0 {
-		t.Errorf("%d requests reached an http endpoint under the baseline, want none", got.asked)
+	if reported := got.records(); len(reported) != 1 {
+		t.Errorf("%d records after the baseline's turn, want the 1 of before", len(reported))
 	}
 }

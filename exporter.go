@@ -193,9 +193,16 @@ func New(config Config) *Exporter {
 // reached is the endpoint of a Config that has one, and a client of its own
 // that reaches it. It panics as New says.
 func (config Config) reached() (*url.URL, *http.Client) {
+	// An endpoint may hold a password, and what a panic says is read where
+	// a password is not to be: one that does not parse is not shown at all,
+	// nor is the parser's error, which quotes it.
 	base, err := url.Parse(config.Endpoint)
-	if err != nil || base.Host == "" {
-		panic(fmt.Sprintf("telemetry: the endpoint %q is no URL", config.Endpoint))
+	if err != nil {
+		panic("telemetry: the endpoint is no URL; it is not shown here, since it may hold a password")
+	}
+
+	if base.Host == "" {
+		panic(fmt.Sprintf("telemetry: the endpoint %s is no URL: it names no host", base.Redacted()))
 	}
 
 	if config.Service == "" {

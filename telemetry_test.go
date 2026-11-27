@@ -795,6 +795,36 @@ func TestMistakesInTheProgramPanic(t *testing.T) {
 	}
 }
 
+// TestAPanicDoesNotTellTheEndpointsPassword: every mistake in a Config that
+// has an endpoint is told without what the endpoint holds of a password.
+func TestAPanicDoesNotTellTheEndpointsPassword(t *testing.T) {
+	t.Parallel()
+
+	for name, config := range map[string]telemetry.Config{
+		"an endpoint that does not parse": {Endpoint: "https://sender:hunter2 and more@collector.test", Service: "prototype"},
+		"an endpoint with no host":        {Endpoint: "https://sender:hunter2@", Service: "prototype"},
+		"an endpoint with no service":     {Endpoint: "https://sender:hunter2@collector.test"},
+		"an endpoint in cleartext":        {Endpoint: "http://sender:hunter2@collector.test", Service: "prototype"},
+		"an endpoint under a transport that is offline": {
+			Endpoint: "https://sender:hunter2@collector.test", Service: "prototype", Transport: xhttp.Config{Offline: true},
+		},
+		"an endpoint that is neither http nor https": {Endpoint: "ftp://sender:hunter2@collector.test", Service: "prototype"},
+	} {
+		func() {
+			defer func() {
+				switch said := fmt.Sprint(recover()); {
+				case said == "<nil>":
+					t.Errorf("%s did not panic", name)
+				case strings.Contains(said, "hunter2"):
+					t.Errorf("%s: the panic tells the password: %s", name, said)
+				}
+			}()
+
+			telemetry.New(config)
+		}()
+	}
+}
+
 // station is an exporter and the stand-in it reports to, for a test that
 // sends through them many times over: a fuzzer runs thousands of inputs a
 // second, and an exporter of its own for each would be a connection for

@@ -71,7 +71,9 @@ telemetry.Config{
 ```
 
 A program hands the exporter no client of its own and shares no connection
-with it.
+with it. An endpoint its `Transport` sends nothing to, an `http` one without
+`Cleartext`, is a mistake `New` and `Watch` panic on at the start, like an
+endpoint that is no URL: it would fail the same way at every request.
 
 ## Crash reports
 

@@ -64,7 +64,7 @@ type Config struct {
 	// go-xhttp client under it, and uses no other. Its zero value is
 	// go-xhttp's baseline, https with a post-quantum hybrid key exchange
 	// only; an endpoint that needs less, an http one among them, is one the
-	// program says so of here. A program hands the exporter no client of its
+	// program says so of here, and New panics on one it has not. A program hands the exporter no client of its
 	// own and shares no connection with it.
 	Transport xhttp.Config
 	// Service, Version and Instance are the resource's service.name,
@@ -138,8 +138,10 @@ type sender struct {
 
 // New returns an exporter under config, and starts it. Shutdown stops it.
 // It panics on an endpoint that is no URL, on an endpoint with no Service: a
-// record nobody can attribute is worth nothing; and, as go-xhttp does, on a
-// Transport that is wrong.
+// record nobody can attribute is worth nothing; as go-xhttp does, on a
+// Transport that is wrong; and on an endpoint its Transport sends nothing
+// to, which is one that is neither http nor https, an http one without
+// Transport.Cleartext, and any at all with Transport.Offline.
 func New(config Config) *Exporter {
 	if config.Endpoint == "" {
 		return &Exporter{}
@@ -198,6 +200,21 @@ func (config Config) reached() (*url.URL, *http.Client) {
 
 	if config.Service == "" {
 		panic("telemetry: an exporter with an endpoint needs a Service")
+	}
+
+	// An endpoint its Transport sends nothing to is as wrong as one that is
+	// no URL: every request would fail the same way for as long as the
+	// program runs, and be sent again all the same.
+	switch {
+	case base.Scheme != "http" && base.Scheme != "https":
+		panic(fmt.Sprintf("telemetry: the endpoint %s is neither http nor https", base.Redacted()))
+	case base.Scheme == "http" && !config.Transport.Cleartext:
+		panic(fmt.Sprintf("telemetry: the endpoint %s is in cleartext, which its Transport does not send: "+
+			"Transport.Cleartext must be set", base.Redacted()))
+	case config.Transport.Offline:
+		panic(
+			"telemetry: an exporter with an endpoint has a Transport that is offline: Transport.Offline must be unset",
+		)
 	}
 
 	return base, xhttp.NewClient(config.Transport)

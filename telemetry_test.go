@@ -755,6 +755,19 @@ func TestMistakesInTheProgramPanic(t *testing.T) {
 		"an endpoint that is no URL":  func() { telemetry.New(telemetry.Config{Endpoint: "::", Service: "prototype"}) },
 		"an endpoint with no service": func() { telemetry.New(telemetry.Config{Endpoint: got.URL}) },
 		"bounds that do not rise":     func() { telemetry.New(telemetry.Config{}).Histogram("spread", "", "", 2, 1) },
+		"an http endpoint under a transport that sends nothing in cleartext": func() {
+			telemetry.New(telemetry.Config{Endpoint: got.URL, Service: "prototype"})
+		},
+		"an endpoint under a transport that is offline": func() {
+			telemetry.New(telemetry.Config{
+				Endpoint: got.URL, Service: "prototype", Transport: xhttp.Config{Cleartext: true, Offline: true},
+			})
+		},
+		"an endpoint that is neither http nor https": func() {
+			telemetry.New(telemetry.Config{
+				Endpoint: "ftp://collector.test", Service: "prototype", Transport: xhttp.Config{Cleartext: true},
+			})
+		},
 		"one name for two sets of bounds": func() {
 			exporter := telemetry.New(got.config())
 			defer shutdown(t, exporter)

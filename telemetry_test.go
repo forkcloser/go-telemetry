@@ -50,17 +50,28 @@ type receiver struct {
 	// onLogs, when set, is called for each request of logs before it is
 	// answered.
 	onLogs func()
+	// complain is told what the stand-in finds wrong with a request: the
+	// test's own Error, or a station's. Set once, before the server starts.
+	complain func(string)
 }
 
 func receive(tb testing.TB) *receiver {
 	tb.Helper()
 
-	got := &receiver{}
+	return stand(tb, httptest.NewServer, func(what string) { tb.Error(what) })
+}
 
-	got.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// stand starts the stand-in on the server start makes. complain is told
+// what it finds wrong with a request, from the request's own goroutine.
+func stand(tb testing.TB, start func(http.Handler) *httptest.Server, complain func(string)) *receiver {
+	tb.Helper()
+
+	got := &receiver{complain: complain}
+
+	got.Server = start(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			tb.Error(err)
+			got.say(err.Error())
 		}
 
 		got.mu.Lock()
@@ -87,7 +98,7 @@ func receive(tb testing.TB) *receiver {
 		}
 
 		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/x-protobuf" {
-			tb.Errorf("%s %s with Content-Type %q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+			got.sayf("%s %s with Content-Type %q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
 		}
 
 		got.mu.Lock()
@@ -99,25 +110,31 @@ func receive(tb testing.TB) *receiver {
 		case "/v1/logs":
 			decoded := &logsservice.ExportLogsServiceRequest{}
 			if err = proto.Unmarshal(body, decoded); err != nil {
-				tb.Errorf("the logs request is not OTLP: %v", err)
+				got.sayf("the logs request is not OTLP: %v", err)
 			}
 
 			got.logs = append(got.logs, decoded)
 		case "/v1/metrics":
 			decoded := &metricsservice.ExportMetricsServiceRequest{}
 			if err = proto.Unmarshal(body, decoded); err != nil {
-				tb.Errorf("the metrics request is not OTLP: %v", err)
+				got.sayf("the metrics request is not OTLP: %v", err)
 			}
 
 			got.metrics = append(got.metrics, decoded)
 		default:
-			tb.Errorf("a request for %s", r.URL.Path)
+			got.sayf("a request for %s", r.URL.Path)
 		}
 	}))
 	tb.Cleanup(got.Close)
 
 	return got
 }
+
+// say has the stand-in complain of what it was sent. It takes no lock: the
+// stand-in complains while it holds its own.
+func (r *receiver) say(what string) { r.complain(what) }
+
+func (r *receiver) sayf(format string, args ...any) { r.say(fmt.Sprintf(format, args...)) }
 
 // config is a Config that reaches the receiver, and sends often.
 func (r *receiver) config() telemetry.Config {
@@ -772,6 +789,33 @@ func TestMistakesInTheProgramPanic(t *testing.T) {
 type station struct {
 	got      *receiver
 	exporter *telemetry.Exporter
+
+	// What the stand-in and the exporter complained of since the last input:
+	// a fuzz target's own F may not be told while an input runs, so the
+	// station keeps it for the T of the input that caused it.
+	mu       sync.Mutex
+	troubles []string
+}
+
+func (s *station) trouble(what string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.troubles = append(s.troubles, what)
+}
+
+// told reports to t what was complained of since the last call.
+func (s *station) told(t *testing.T) {
+	t.Helper()
+
+	s.mu.Lock()
+	troubles := s.troubles
+	s.troubles = nil
+	s.mu.Unlock()
+
+	for _, what := range troubles {
+		t.Error(what)
+	}
 }
 
 // open is a station whose exporter sends what it holds every millisecond,
@@ -779,13 +823,15 @@ type station struct {
 func open(tb testing.TB) *station {
 	tb.Helper()
 
-	got := receive(tb)
+	sends := &station{}
+	sends.got = stand(tb, httptest.NewServer, sends.trouble)
 
-	config := got.config()
+	config := sends.got.config()
 	config.Interval = time.Millisecond
-	config.OnError = func(err error) { tb.Log(err) }
+	config.OnError = func(err error) { sends.trouble(err.Error()) }
 
 	exporter := telemetry.New(config)
+	sends.exporter = exporter
 
 	tb.Cleanup(func() {
 		//nolint:usetesting // the test's own context has ended by the time its cleanups run
@@ -795,7 +841,7 @@ func open(tb testing.TB) *station {
 		_ = exporter.Shutdown(ctx)
 	})
 
-	return &station{got: got, exporter: exporter}
+	return sends
 }
 
 // next has send hand the exporter one record, and returns it as the
@@ -807,12 +853,21 @@ func (s *station) next(t *testing.T, send func(*telemetry.Exporter)) *logs.LogRe
 	s.got.forget()
 	send(s.exporter)
 
+	defer s.told(t)
+
 	for deadline := time.Now().Add(patient); ; time.Sleep(100 * time.Microsecond) {
 		if reported := s.got.records(); len(reported) > 0 {
 			return reported[0]
 		}
 
-		if time.Now().After(deadline) {
+		// A request the stand-in could not read, or an export that failed,
+		// is why no record will come.
+		s.mu.Lock()
+		troubled := len(s.troubles) > 0
+		s.mu.Unlock()
+
+		if troubled || time.Now().After(deadline) {
+			s.told(t)
 			t.Fatal("the record never reached the stand-in")
 		}
 	}
